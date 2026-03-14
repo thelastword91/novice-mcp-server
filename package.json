@@ -12,10 +12,12 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "picomatch": "^4.0.3"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",
+    "@types/picomatch": "^4.0.2",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },

@@ -16,7 +16,10 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { NoviceClient } from './novice-client.js';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { join, relative } from 'node:path';
+import picomatch from 'picomatch';
+import { NoviceClient, type NoviceFile } from './novice-client.js';
 
 const API_URL = process.env.NOVICE_API_URL || 'https://novice.up.railway.app';
 const API_TOKEN = process.env.NOVICE_API_TOKEN || '';
@@ -41,7 +44,7 @@ const server = new McpServer({
 
 server.tool(
   'novice_upload',
-  '파일들을 Novice 프로젝트에 업로드합니다. project_name으로 자동 매칭되며, 없으면 새 프로젝트가 생성됩니다.',
+  '파일들을 Novice 프로젝트에 업로드합니다. 반드시 모든 파일을 한 번의 호출에 files 배열로 포함하세요 (여러 번 나눠 호출하지 마세요). 로컬 디렉토리 전체를 업로드하려면 novice_upload_dir을 사용하세요. project_name으로 자동 매칭되며, 없으면 새 프로젝트가 생성됩니다.',
   {
     project_name: z.string().optional().describe('프로젝트 이름 (자동 매칭/생성, CLAUDE.md의 novice_project_name 사용 권장)'),
     project_id: z.string().uuid().optional().describe('프로젝트 ID (직접 지정, 선택)'),
@@ -174,6 +177,194 @@ server.tool(
     } catch (error) {
       return {
         content: [{ type: 'text' as const, text: `공유 URL 조회 실패: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ===========================
+// 도구 4: novice_upload_dir
+// ===========================
+
+const DEFAULT_EXCLUDES = [
+  'node_modules/**', '.git/**', 'dist/**', '.next/**',
+  '.env*', '*.lock', 'package-lock.json', '.DS_Store',
+  '__pycache__/**', '.vscode/**', '.idea/**',
+];
+
+const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const MAX_FILE_COUNT = 50;
+
+function isBinaryBuffer(buffer: Buffer): boolean {
+  const sample = buffer.subarray(0, 8192);
+  return sample.includes(0);
+}
+
+interface CollectResult {
+  files: NoviceFile[];
+  warnings: string[];
+  skipped: number;
+}
+
+async function collectFiles(
+  rootDir: string,
+  options: { include?: string[]; exclude?: string[]; maxDepth: number },
+): Promise<CollectResult> {
+  const allExcludes = [...DEFAULT_EXCLUDES, ...(options.exclude || [])];
+  const includeMatcher = options.include ? picomatch(options.include) : null;
+  const excludeMatcher = picomatch(allExcludes);
+
+  const files: NoviceFile[] = [];
+  const warnings: string[] = [];
+  let skipped = 0;
+
+  async function walk(dir: string, depth: number) {
+    if (depth > options.maxDepth) return;
+
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      warnings.push(`읽기 실패: ${relative(rootDir, dir)}`);
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = join(dir, entry.name);
+      const relPath = relative(rootDir, fullPath).replace(/\\/g, '/');
+
+      if (excludeMatcher(relPath)) {
+        skipped++;
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        // 디렉토리 이름 자체가 제외 대상인지 확인
+        if (excludeMatcher(entry.name + '/')) {
+          skipped++;
+          continue;
+        }
+        await walk(fullPath, depth + 1);
+      } else if (entry.isFile()) {
+        if (includeMatcher && !includeMatcher(relPath)) {
+          skipped++;
+          continue;
+        }
+
+        try {
+          const fileStat = await stat(fullPath);
+          if (fileStat.size > MAX_FILE_SIZE) {
+            warnings.push(`스킵 (>5MB): ${relPath} (${(fileStat.size / 1024 / 1024).toFixed(1)}MB)`);
+            skipped++;
+            continue;
+          }
+
+          const buffer = await readFile(fullPath);
+          if (isBinaryBuffer(buffer)) {
+            skipped++;
+            continue;
+          }
+
+          files.push({ name: relPath, content: buffer.toString('utf-8') });
+        } catch {
+          warnings.push(`읽기 실패: ${relPath}`);
+          skipped++;
+        }
+      }
+    }
+  }
+
+  await walk(rootDir, 0);
+  return { files, warnings, skipped };
+}
+
+server.tool(
+  'novice_upload_dir',
+  '로컬 디렉토리의 파일들을 한 번에 Novice에 업로드합니다. 파일 내용을 채팅에 붙여넣을 필요 없이, 경로만 전달하면 MCP 서버가 직접 읽어서 업로드합니다. node_modules, .git 등은 자동 제외됩니다.',
+  {
+    dir_path: z.string().describe('업로드할 디렉토리의 절대 경로 (예: /Users/me/Desktop/my-project)'),
+    include: z.array(z.string()).optional().describe('포함할 glob 패턴 (예: ["*.html", "*.css", "*.js", "src/**/*.tsx"]). 생략 시 모든 텍스트 파일'),
+    exclude: z.array(z.string()).optional().describe('추가 제외 glob 패턴 (node_modules, .git 등은 기본 제외)'),
+    max_depth: z.number().int().min(1).max(20).optional().describe('최대 탐색 깊이 (기본: 10)'),
+    project_name: z.string().optional().describe('프로젝트 이름 (자동 매칭/생성)'),
+    project_id: z.string().uuid().optional().describe('프로젝트 ID (직접 지정, 선택)'),
+    message: z.string().optional().describe('업로드 메시지 (버전 설명)'),
+  },
+  async ({ dir_path, include, exclude, max_depth, project_name, project_id, message }) => {
+    // 1. 디렉토리 존재 확인
+    try {
+      const dirStat = await stat(dir_path);
+      if (!dirStat.isDirectory()) {
+        return {
+          content: [{ type: 'text' as const, text: `경로가 디렉토리가 아닙니다: ${dir_path}\n파일 하나를 업로드하려면 novice_upload를 사용하세요.` }],
+          isError: true,
+        };
+      }
+    } catch {
+      return {
+        content: [{ type: 'text' as const, text: `디렉토리를 찾을 수 없습니다: ${dir_path}\n경로를 확인해주세요.` }],
+        isError: true,
+      };
+    }
+
+    // 2. 프로젝트 결정
+    const pName = project_name || DEFAULT_PROJECT_NAME;
+    const pId = project_id || DEFAULT_PROJECT_ID;
+
+    if (!pName && !pId) {
+      return {
+        content: [{ type: 'text' as const, text: 'project_name 또는 project_id가 필요합니다. 파라미터로 전달하거나 NOVICE_PROJECT_NAME 환경변수를 설정해주세요.' }],
+        isError: true,
+      };
+    }
+
+    // 3. 파일 수집
+    const result = await collectFiles(dir_path, {
+      include,
+      exclude,
+      maxDepth: max_depth ?? 10,
+    });
+
+    if (result.files.length === 0) {
+      const patternInfo = include ? `\n포함 패턴: ${include.join(', ')}` : '';
+      return {
+        content: [{ type: 'text' as const, text: `매칭되는 파일이 없습니다.${patternInfo}\n디렉토리: ${dir_path}\n건너뛴 파일: ${result.skipped}개` }],
+        isError: true,
+      };
+    }
+
+    if (result.files.length > MAX_FILE_COUNT) {
+      return {
+        content: [{ type: 'text' as const, text: `파일이 너무 많습니다: ${result.files.length}개 (최대 ${MAX_FILE_COUNT}개)\ninclude 패턴을 좁히거나 exclude를 추가하세요.\n예: include: ["*.html", "*.css", "*.js"]` }],
+        isError: true,
+      };
+    }
+
+    // 4. 업로드
+    try {
+      const uploadResult = await client.upload({
+        project_name: pName || undefined,
+        project_id: pId || undefined,
+        files: result.files,
+        message,
+      });
+
+      const statusMsg = uploadResult.created ? '새 프로젝트 생성됨' : '기존 프로젝트 업데이트';
+      const fileList = result.files.map(f => f.name).join(', ');
+      const warningText = result.warnings.length > 0
+        ? `\n\n⚠️ 경고:\n${result.warnings.map(w => `  - ${w}`).join('\n')}`
+        : '';
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `업로드 성공! 버전 ${uploadResult.version_number} 생성 (파일 ${uploadResult.files_count}개)\n프로젝트: ${uploadResult.project_name} (${statusMsg})\nID: ${uploadResult.project_id}\n\n업로드된 파일:\n  ${fileList}\n\n건너뛴 파일: ${result.skipped}개${warningText}`,
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: 'text' as const, text: `업로드 실패: ${error instanceof Error ? error.message : String(error)}` }],
         isError: true,
       };
     }

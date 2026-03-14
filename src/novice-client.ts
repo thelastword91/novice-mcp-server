@@ -47,14 +47,24 @@ export class NoviceClient {
 
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${path}`;
-    const res = await fetch(url, {
-      ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiToken}`,
-        ...options?.headers,
-      },
-    });
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        ...options,
+        signal: AbortSignal.timeout(30_000),
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.apiToken}`,
+          ...options?.headers,
+        },
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'TimeoutError') {
+        throw new Error(`Novice API 타임아웃 (30초): ${url}`);
+      }
+      throw error;
+    }
 
     if (!res.ok) {
       const body = await res.text().catch(() => '');
