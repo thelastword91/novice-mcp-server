@@ -75,7 +75,7 @@ export class NoviceClient {
   }
 
   // Top-level upload (Option B: project_name 기반 자동 매칭/생성)
-  async upload(options: { project_id?: string; project_name?: string; files: NoviceFile[]; message?: string }): Promise<UploadResult> {
+  async upload(options: { project_id?: string; project_name?: string; files: NoviceFile[]; message?: string; phase?: 'planning' | 'development' }): Promise<UploadResult> {
     return this.request<UploadResult>('/api/upload', {
       method: 'POST',
       body: JSON.stringify(options),

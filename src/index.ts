@@ -44,7 +44,7 @@ const server = new McpServer({
 
 server.tool(
   'novice_upload',
-  'Novice에 업로드합니다. 폴더를 업로드할 때는 반드시 dir_path를 사용하세요 — MCP 서버가 파일을 직접 읽어 가장 빠릅니다. files는 코드 조각 등 소량 데이터에만 사용하세요.',
+  'Novice에 업로드합니다. 폴더를 업로드할 때는 반드시 dir_path를 사용하세요 — MCP 서버가 파일을 직접 읽어 가장 빠릅니다. files는 코드 조각 등 소량 데이터에만 사용하세요. phase를 지정하지 않으면 사용자에게 기획 모드(planning)와 개발 모드(development) 중 선택을 요청하세요.',
   {
     dir_path: z.string().optional().describe('업로드할 디렉토리 절대 경로 (폴더 업로드 시 필수, 가장 빠름). 예: /Users/me/my-project'),
     include: z.array(z.string()).optional().describe('포함할 glob 패턴 (dir_path 사용 시). 예: ["*.html", "*.css", "*.js"]'),
@@ -57,8 +57,9 @@ server.tool(
     project_name: z.string().optional().describe('프로젝트 이름 (자동 매칭/생성)'),
     project_id: z.string().uuid().optional().describe('프로젝트 ID (직접 지정, 선택)'),
     message: z.string().optional().describe('업로드 메시지 (버전 설명)'),
+    phase: z.enum(['planning', 'development']).optional().describe('프로젝트 모드. planning=UI 프로토타입(외부 API 차단), development=실제 기능 테스트(Firebase/OAuth 등 허용). 사용자가 지정하지 않으면 반드시 물어볼 것'),
   },
-  async ({ dir_path, include, exclude, max_depth, files, project_name, project_id, message }) => {
+  async ({ dir_path, include, exclude, max_depth, files, project_name, project_id, message, phase }) => {
     // 입력 검증
     if (!dir_path && (!files || files.length === 0)) {
       return {
@@ -116,9 +117,11 @@ server.tool(
         project_id: pId || undefined,
         files: uploadFiles,
         message,
+        phase,
       });
 
       const statusMsg = result.created ? '새 프로젝트 생성됨' : '기존 프로젝트 업데이트';
+      const phaseLabel = phase === 'planning' ? '기획 모드' : phase === 'development' ? '개발 모드' : '기본';
       const fileList = uploadFiles.map(f => f.name).join(', ');
       const warningText = warnings.length > 0 ? `\n\n⚠️ 경고:\n${warnings.map(w => `  - ${w}`).join('\n')}` : '';
       const skippedText = dir_path ? `\n건너뛴 파일: ${skipped}개` : '';
@@ -126,7 +129,7 @@ server.tool(
       return {
         content: [{
           type: 'text' as const,
-          text: `업로드 성공! 버전 ${result.version_number} 생성 (파일 ${result.files_count}개)\n프로젝트: ${result.project_name} (${statusMsg})\nID: ${result.project_id}\n\n업로드된 파일:\n  ${fileList}${skippedText}${warningText}`,
+          text: `업로드 성공! 버전 ${result.version_number} 생성 (파일 ${result.files_count}개)\n프로젝트: ${result.project_name} (${statusMsg}, ${phaseLabel})\nID: ${result.project_id}\n\n업로드된 파일:\n  ${fileList}${skippedText}${warningText}`,
         }],
       };
     } catch (error) {
