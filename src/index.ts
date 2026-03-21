@@ -110,6 +110,9 @@ server.tool(
       uploadFiles = files!;
     }
 
+    // 유저 플로우 순서로 정렬 (HTML 파일 우선, 파일명 기반 휴리스틱)
+    uploadFiles = sortByUserFlow(uploadFiles);
+
     // 업로드
     try {
       const result = await client.upload({
@@ -234,6 +237,48 @@ server.tool(
     }
   }
 );
+
+// ===========================
+// 유저 플로우 순서 정렬
+// ===========================
+
+const FLOW_PRIORITY: Record<string, number> = {
+  'index': 0, 'home': 0, 'landing': 0, 'main': 0,
+  'login': 10, 'signin': 10, 'sign-in': 10,
+  'signup': 11, 'register': 11, 'sign-up': 11,
+  'onboarding': 20,
+  'dashboard': 30,
+  'profile': 80, 'settings': 80, 'account': 80,
+  'mypage': 80, 'my-page': 80,
+  'error': 90, '404': 90, '500': 90,
+  'admin': 95,
+};
+
+const DEFAULT_PRIORITY = 50;
+
+function sortByUserFlow(files: NoviceFile[]): NoviceFile[] {
+  const htmlFiles: NoviceFile[] = [];
+  const otherFiles: NoviceFile[] = [];
+
+  for (const f of files) {
+    if (/\.html?$/i.test(f.name)) {
+      htmlFiles.push(f);
+    } else {
+      otherFiles.push(f);
+    }
+  }
+
+  htmlFiles.sort((a, b) => {
+    const keyA = (a.name.split('/').pop() || a.name).replace(/\.html?$/i, '').toLowerCase();
+    const keyB = (b.name.split('/').pop() || b.name).replace(/\.html?$/i, '').toLowerCase();
+    const prioA = FLOW_PRIORITY[keyA] ?? DEFAULT_PRIORITY;
+    const prioB = FLOW_PRIORITY[keyB] ?? DEFAULT_PRIORITY;
+    if (prioA !== prioB) return prioA - prioB;
+    return keyA.localeCompare(keyB);
+  });
+
+  return [...htmlFiles, ...otherFiles];
+}
 
 // ===========================
 // 디렉토리 파일 수집 유틸리티
