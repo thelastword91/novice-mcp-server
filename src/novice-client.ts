@@ -36,6 +36,19 @@ export interface ShareComment {
   page_name: string;
 }
 
+function isRetryable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  return (
+    error.name === 'TimeoutError' ||
+    msg.includes('econnreset') ||
+    msg.includes('econnrefused') ||
+    msg.includes('etimedout') ||
+    msg.includes('fetch failed') ||
+    msg.includes('network')
+  );
+}
+
 export class NoviceClient {
   private baseUrl: string;
   private apiToken: string;
@@ -47,31 +60,40 @@ export class NoviceClient {
 
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
     const url = `${this.baseUrl}${path}`;
+    let lastError: unknown;
 
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        ...options,
-        signal: AbortSignal.timeout(30_000),
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.apiToken}`,
-          ...options?.headers,
-        },
-      });
-    } catch (error) {
-      if (error instanceof Error && error.name === 'TimeoutError') {
-        throw new Error(`Novice API 타임아웃 (30초): ${url}`);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(url, {
+          ...options,
+          signal: AbortSignal.timeout(30_000),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.apiToken}`,
+            ...options?.headers,
+          },
+        });
+
+        if (!res.ok) {
+          const body = await res.text().catch(() => '');
+          throw new Error(`Novice API 에러 (${res.status}): ${body}`);
+        }
+
+        return res.json() as Promise<T>;
+      } catch (error) {
+        lastError = error;
+        if (attempt === 0 && isRetryable(error)) {
+          await new Promise((r) => setTimeout(r, 1000));
+          continue;
+        }
+        if (error instanceof Error && error.name === 'TimeoutError') {
+          throw new Error(`Novice API 타임아웃 (30초): ${url}`);
+        }
+        throw error;
       }
-      throw error;
     }
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => '');
-      throw new Error(`Novice API 에러 (${res.status}): ${body}`);
-    }
-
-    return res.json() as Promise<T>;
+    throw lastError;
   }
 
   // Top-level upload (Option B: project_name 기반 자동 매칭/생성)

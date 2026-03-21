@@ -377,6 +377,19 @@ async function collectFiles(
 }
 
 // ===========================
+// 프로세스 안정성 (Server disconnected 방지)
+// ===========================
+
+process.on('uncaughtException', (err) => {
+  console.error('[novice-mcp] uncaughtException:', err.message);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[novice-mcp] unhandledRejection:', reason);
+});
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
+
+// ===========================
 // 서버 시작
 // ===========================
 
